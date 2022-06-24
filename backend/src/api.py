@@ -1,11 +1,12 @@
 from crypt import methods
 import os
+from turtle import title
 from flask import Flask, request, jsonify, abort
 from sqlalchemy import exc
 import json
 from flask_cors import CORS
 
-from .database.models import db_drop_and_create_all, setup_db, Drink
+from .database.models import db_drop_and_create_all, setup_db, Drink, db
 from .auth.auth import AuthError, requires_auth
 
 app = Flask(__name__)
@@ -43,7 +44,10 @@ def get_drinks(payload):
             "drinks": formated_drinks
         })
     except:
+        db.session.rollback()
         abort(404)
+    finally:
+        db.session.close()
 
 
 '''
@@ -68,8 +72,13 @@ def get_drinks_detail(payload):
             "success": True,
             "drinks": long_format_drinks_detail
         })
+
     except:
-        abort(403)
+        db.session.rollback()
+        abort(404)
+
+    finally:
+        db.session.close()
 
 
 '''
@@ -86,20 +95,27 @@ def get_drinks_detail(payload):
 @app.route("/drinks", methods=["POST"])
 @requires_auth("post:drinks")
 def add_drink(payload):
+
     data = request.get_json()
-    title = data.get("title")
-    recipe = data.get("receipe")
+    title = data.get("title", None)
+    recipe = data.get("receipe", None)
 
-    new_drink = Drink(title=title, recipe=recipe)
-    new_drink.insert()
+    if title is None or recipe is None:
+        abort(405)
 
-    drinks = Drink.query.order_by(Drink.id).all()
-    formated_drink = [drink.long() for drink in drinks]
+    try:
+        new_drink = Drink(title=title, recipe=json.dumps([recipe]))
+        new_drink.insert()
 
-    return jsonify({
-        "success": True,
-        "drinks": formated_drink
-    })
+        return jsonify({
+            "success": True,
+            "drinks": [new_drink.long()]
+        })
+    except:
+        db.session.rollback()
+        abort(422)
+    finally:
+        db.session.close()
 
 
 '''
@@ -119,24 +135,31 @@ def add_drink(payload):
 @requires_auth("patch:drinks")
 def edit_drink(payload, id):
 
+    drink_new_data = request.get_json()
+
     try:
         drink = Drink.query.filter(Drink.id == id).one_or_none()
-        drink_new_data = request.get_json()
+        if drink is None:
+            abort(404)
+
+        if "title" or "recipe" not in drink:
+            abort(405)
 
         drink.title = drink_new_data.get("title")
         drink.recipe = drink_new_data.get("recipe")
 
         drink.update()
 
-        drinks = Drink.query.order_by(Drink.id).all()
-        formated_drink = [drink.long() for drink in drinks]
-
         return jsonify({
             "success": True,
-            "drinks": formated_drink
+            "drinks": [drink.long()]
         })
+
     except:
+        db.session.rollback()
         abort(422)
+    finally:
+        db.session.close()
 
 
 '''
@@ -154,12 +177,21 @@ def edit_drink(payload, id):
 @app.route("/drinks/<id>", methods=["DELETE"])
 @requires_auth("delete:drinks")
 def delete_drink(payload, id):
-    drink = Drink.query.filter(Drink.id == id).one_or_none()
-    drink.delete()
-    return jsonify({
-        "success": True,
-        "delete": id
-    })
+
+    try:
+        drink = Drink.query.filter(Drink.id == id).one_or_none()
+
+        if drink is None:
+            abort(404)
+
+        drink.delete()
+
+        return jsonify({
+            "success": True,
+            "delete": id
+        })
+    except:
+        abort(422)
 
 
 # Error Handling
@@ -194,7 +226,42 @@ def unprocessable(error):
 '''
 
 
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({
+        "success": False,
+        "error": 404,
+        "message": "resouse not found"
+    }), 404
+
+
+@app.errorhandler(422)
+def unprocessable(error):
+    return jsonify({
+        "success": False, "error": 422,
+        "message": "unprocessable"
+    }), 422,
+
+
+@app.errorhandler(405)
+def method_not_allowed(error):
+    return jsonify({
+        "success": False,
+        "error": 405,
+        "message": "method not allowed"
+    }), 405
+
+
 '''
 @TODO implement error handler for AuthError
     error handler should conform to general task above
 '''
+
+
+@app.errorhandler(AuthError)
+def handle_auth_error(auth_error):
+    return jsonify({
+        "success": False,
+        "error": auth_error.status_code,
+        "message": auth_error.error['description']
+    }), auth_error.status_code
